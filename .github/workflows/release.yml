@@ -23,32 +23,24 @@ jobs:
 
     steps:
       - name: Checkout repository with submodules
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v6
-
-      - name: Validate Gradle wrappers
-        uses: gradle/actions/wrapper-validation@v6
+        uses: gradle/actions/setup-gradle@v4
 
       - name: Make Gradle wrappers executable
         run: |
           chmod +x fortress/gradlew
           chmod +x freighter/gradlew
-
-      # ---------------------------------------------------------
-      # Build Freighter first.
-      # Fortress bundles Freighter inside its release APK.
-      # ---------------------------------------------------------
 
       - name: Build Freighter
         working-directory: freighter
@@ -57,8 +49,9 @@ jobs:
 
       - name: Find Freighter APK
         id: freighter
+        working-directory: freighter
         run: |
-          APK=$(find freighter \
+          APK=$(find . \
             -type f \
             -path '*/build/outputs/apk/release/*.apk' \
             ! -name '*-unsigned.apk' \
@@ -66,16 +59,13 @@ jobs:
 
           if [ -z "$APK" ]; then
             echo "ERROR: Freighter APK not found"
-            find freighter -type f -name '*.apk' -print
+            find . -type f -name '*.apk' -print
             exit 1
           fi
 
+          APK="${APK#./}"
           echo "Found Freighter: $APK"
-          echo "apk=$APK" >> "$GITHUB_OUTPUT"
-
-      # ---------------------------------------------------------
-      # Bundle Freighter into Fortress.
-      # ---------------------------------------------------------
+          echo "apk=freighter/$APK" >> "$GITHUB_OUTPUT"
 
       - name: Bundle Freighter into Fortress
         run: |
@@ -84,12 +74,8 @@ jobs:
           cp "${{ steps.freighter.outputs.apk }}" \
              fortress/app/src/release/assets/freighter.apk
 
-          echo "Bundled Freighter:"
+          echo "Freighter bundled successfully:"
           ls -lh fortress/app/src/release/assets/freighter.apk
-
-      # ---------------------------------------------------------
-      # Build Fortress.
-      # ---------------------------------------------------------
 
       - name: Build Fortress
         working-directory: fortress
@@ -98,8 +84,9 @@ jobs:
 
       - name: Find Fortress APK
         id: fortress
+        working-directory: fortress
         run: |
-          APK=$(find fortress \
+          APK=$(find . \
             -type f \
             -path '*/build/outputs/apk/release/*.apk' \
             ! -name '*-unsigned.apk' \
@@ -107,18 +94,15 @@ jobs:
 
           if [ -z "$APK" ]; then
             echo "ERROR: Fortress APK not found"
-            find fortress -type f -name '*.apk' -print
+            find . -type f -name '*.apk' -print
             exit 1
           fi
 
+          APK="${APK#./}"
           echo "Found Fortress: $APK"
-          echo "apk=$APK" >> "$GITHUB_OUTPUT"
+          echo "apk=fortress/$APK" >> "$GITHUB_OUTPUT"
 
-      # ---------------------------------------------------------
-      # Prepare release files.
-      # ---------------------------------------------------------
-
-      - name: Prepare release
+      - name: Prepare release files
         run: |
           rm -rf dist
           mkdir -p dist
@@ -133,16 +117,16 @@ jobs:
 
           sha256sum Fortress.apk Freighter.apk > SHA256SUMS.txt
 
-          echo "=== RELEASE FILES ==="
+          echo "================================"
+          echo "RELEASE FILES"
+          echo "================================"
           ls -lh
 
           echo
-          echo "=== SHA256 ==="
+          echo "================================"
+          echo "SHA256"
+          echo "================================"
           cat SHA256SUMS.txt
-
-      # ---------------------------------------------------------
-      # Create GitHub Release.
-      # ---------------------------------------------------------
 
       - name: Create GitHub Release
         env:
@@ -151,6 +135,12 @@ jobs:
           PRERELEASE: ${{ inputs.prerelease }}
         run: |
           TAG="v${VERSION}"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "ERROR: Release $TAG already exists."
+            echo "Use a different version number."
+            exit 1
+          fi
 
           if [ "$PRERELEASE" = "true" ]; then
             gh release create "$TAG" \
