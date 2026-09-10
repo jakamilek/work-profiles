@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version, e.g. 1.0.0"
+        description: "Release version, e.g. 1.0.1"
         required: true
         type: string
       prerelease:
         description: "Mark as prerelease"
         required: true
-        default: false
+        default: true
         type: boolean
 
 permissions:
@@ -22,6 +22,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
       - name: Checkout repository with submodules
         uses: actions/checkout@v4
         with:
@@ -42,6 +43,32 @@ jobs:
           chmod +x fortress/gradlew
           chmod +x freighter/gradlew
 
+      # ---------------------------------------------------------
+      # Create a temporary signing key.
+      #
+      # This is NOT the author's official release key.
+      # It is generated only for this GitHub Actions build.
+      # ---------------------------------------------------------
+
+      - name: Create temporary signing key
+        run: |
+          mkdir -p signing
+
+          keytool -genkeypair \
+            -v \
+            -keystore signing/fortress-ci.jks \
+            -alias fortress \
+            -keyalg RSA \
+            -keysize 4096 \
+            -validity 10000 \
+            -storepass android \
+            -keypass android \
+            -dname "CN=Fortress CI, OU=Local Build, O=Fortress, L=Local, ST=Local, C=PL"
+
+      # ---------------------------------------------------------
+      # Build Freighter.
+      # ---------------------------------------------------------
+
       - name: Build Freighter
         working-directory: freighter
         run: |
@@ -54,7 +81,6 @@ jobs:
           APK=$(find . \
             -type f \
             -path '*/build/outputs/apk/release/*.apk' \
-            ! -name '*-unsigned.apk' \
             | head -n 1)
 
           if [ -z "$APK" ]; then
@@ -63,19 +89,55 @@ jobs:
             exit 1
           fi
 
+          echo "Found Freighter:"
+          echo "$APK"
+
           APK="${APK#./}"
-          echo "Found Freighter: $APK"
+
           echo "apk=freighter/$APK" >> "$GITHUB_OUTPUT"
+
+      # ---------------------------------------------------------
+      # Sign Freighter.
+      # ---------------------------------------------------------
+
+      - name: Sign Freighter
+        run: |
+          mkdir -p signed
+
+          $ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -n 1)/zipalign \
+            -f 4 \
+            "${{ steps.freighter.outputs.apk }}" \
+            signed/Freighter-aligned.apk
+
+          $ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -n 1)/apksigner sign \
+            --ks signing/fortress-ci.jks \
+            --ks-key-alias fortress \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            --out signed/Freighter.apk \
+            signed/Freighter-aligned.apk
+
+          $ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -n 1)/apksigner verify \
+            --verbose \
+            signed/Freighter.apk
+
+      # ---------------------------------------------------------
+      # Bundle signed Freighter into Fortress.
+      # ---------------------------------------------------------
 
       - name: Bundle Freighter into Fortress
         run: |
           mkdir -p fortress/app/src/release/assets
 
-          cp "${{ steps.freighter.outputs.apk }}" \
+          cp signed/Freighter.apk \
              fortress/app/src/release/assets/freighter.apk
 
-          echo "Freighter bundled successfully:"
+          echo "Bundled Freighter:"
           ls -lh fortress/app/src/release/assets/freighter.apk
+
+      # ---------------------------------------------------------
+      # Build Fortress.
+      # ---------------------------------------------------------
 
       - name: Build Fortress
         working-directory: fortress
@@ -89,7 +151,6 @@ jobs:
           APK=$(find . \
             -type f \
             -path '*/build/outputs/apk/release/*.apk' \
-            ! -name '*-unsigned.apk' \
             | head -n 1)
 
           if [ -z "$APK" ]; then
@@ -98,19 +159,64 @@ jobs:
             exit 1
           fi
 
+          echo "Found Fortress:"
+          echo "$APK"
+
           APK="${APK#./}"
-          echo "Found Fortress: $APK"
+
           echo "apk=fortress/$APK" >> "$GITHUB_OUTPUT"
+
+      # ---------------------------------------------------------
+      # Sign Fortress with EXACTLY the same key.
+      # ---------------------------------------------------------
+
+      - name: Sign Fortress
+        run: |
+          $ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -n 1)/zipalign \
+            -f 4 \
+            "${{ steps.fortress.outputs.apk }}" \
+            signed/Fortress-aligned.apk
+
+          $ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -n 1)/apksigner sign \
+            --ks signing/fortress-ci.jks \
+            --ks-key-alias fortress \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            --out signed/Fortress.apk \
+            signed/Fortress-aligned.apk
+
+          $ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -n 1)/apksigner verify \
+            --verbose \
+            signed/Fortress.apk
+
+      # ---------------------------------------------------------
+      # Verify that Fortress and Freighter use the same certificate.
+      # ---------------------------------------------------------
+
+      - name: Verify signing certificates
+        run: |
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -n 1)"
+
+          echo "=== Fortress certificate ==="
+          "$BUILD_TOOLS/apksigner" verify --print-certs signed/Fortress.apk
+
+          echo
+          echo "=== Freighter certificate ==="
+          "$BUILD_TOOLS/apksigner" verify --print-certs signed/Freighter.apk
+
+      # ---------------------------------------------------------
+      # Prepare release.
+      # ---------------------------------------------------------
 
       - name: Prepare release files
         run: |
           rm -rf dist
           mkdir -p dist
 
-          cp "${{ steps.fortress.outputs.apk }}" \
+          cp signed/Fortress.apk \
              dist/Fortress.apk
 
-          cp "${{ steps.freighter.outputs.apk }}" \
+          cp signed/Freighter.apk \
              dist/Freighter.apk
 
           cd dist
@@ -120,13 +226,19 @@ jobs:
           echo "================================"
           echo "RELEASE FILES"
           echo "================================"
+
           ls -lh
 
           echo
           echo "================================"
           echo "SHA256"
           echo "================================"
+
           cat SHA256SUMS.txt
+
+      # ---------------------------------------------------------
+      # Create GitHub Release.
+      # ---------------------------------------------------------
 
       - name: Create GitHub Release
         env:
